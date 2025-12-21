@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import sys
 import asyncio
+# === 修复：添加 Path 导入 ===
+from pathlib import Path
 from zoneinfo import ZoneInfo
 from loguru import logger
 from settings import settings
@@ -40,13 +42,19 @@ def patch_aihubmix_bypass():
 
         async def patched_upload(self_files, file, **kwargs):
             """拦截上传，将文件存入内存"""
-            if hasattr(file, 'read'): content = file.read()
+            # 处理文件流或路径
+            if hasattr(file, 'read'): 
+                content = file.read()
             elif isinstance(file, (str, Path)):
-                with open(file, 'rb') as f: content = f.read()
-            else: content = bytes(file)
+                with open(file, 'rb') as f: 
+                    content = f.read()
+            else: 
+                content = bytes(file)
             
-            if asyncio.iscoroutine(content): content = await content
+            if asyncio.iscoroutine(content): 
+                content = await content
             
+            # 使用内容摘要作为 ID
             file_id = f"bypass_{id(content)}"
             file_cache[file_id] = content
             return types.File(name=file_id, uri=file_id, mime_type="image/png")
@@ -59,9 +67,32 @@ def patch_aihubmix_bypass():
             
             for content in normalized:
                 for i, part in enumerate(content.parts):
+                    # 如果检测到被拦截的文件 ID，则转换格式
                     if part.file_data and part.file_data.file_uri in file_cache:
                         data = file_cache[part.file_data.file_uri]
                         # 强行转换为 Inline Data (Base64)
+                        content.parts[i] = types.Part.from_bytes(data=data, mime_type="image/png")
+            
+            return await orig_generate(self_models, model, normalized, **kwargs)
+
+        # 挂载补丁
+        genai.files.AsyncFiles.upload = patched_upload
+        genai.models.AsyncModels.generate_content = patched_generate
+        
+    except Exception as e:
+        logger.error(f"终极补丁加载失败: {e}")
+
+def init_log(**sink_channel):
+    # 强制注入中转补丁
+    patch_aihubmix_bypass()
+    
+    log_level = os.getenv("LOG_LEVEL", "DEBUG").upper()
+    logger.remove()
+    logger.add(sink=sys.stdout, level=log_level, filter=timezone_filter)
+    return logger
+
+# 执行初始化
+init_log()                        # 强行转换为 Inline Data (Base64)
                         content.parts[i] = types.Part.from_bytes(data=data, mime_type="image/png")
             
             return await orig_generate(self_models, model, normalized, **kwargs)
