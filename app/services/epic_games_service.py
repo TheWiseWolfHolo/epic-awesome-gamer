@@ -76,7 +76,7 @@ def get_promotions() -> List[PromotionGame]:
             e["url"] = f"{URL_PRODUCT_PAGE.rstrip('/')}/{e['offerMappings'][0]['pageSlug']}"
         except (KeyError, IndexError):
             if e.get("productSlug"):
-                # [修复 1] 优先使用商品页 (/p/) 而非捆绑包页 (/bundles/)，修复 Blood West 等游戏链接错误
+                # [修复 1] 优先使用商品页 (/p/) 而非捆绑包页 (/bundles/)
                 e["url"] = f"{URL_PRODUCT_PAGE.rstrip('/')}/{e['productSlug']}"
             else:
                 logger.info(f"Failed to get URL: {e}")
@@ -182,7 +182,7 @@ class EpicAgent:
             logger.success("All week-free games are already in the library")
             return
 
-        # [修复 2] 移除 Bundle 过滤逻辑，统一处理所有识别到的免费游戏
+        # [修复 2] 移除 Bundle 过滤逻辑
         for p in self._promotions:
             pj = json.dumps({"title": p.title, "url": p.url}, indent=2, ensure_ascii=False)
             logger.debug(f"Discover promotion \n{pj}")
@@ -247,13 +247,26 @@ class EpicGames:
         for url in urls:
             await page.goto(url, wait_until="load")
 
-            # <-- Handle pre-page
-            # with suppress(TimeoutError):
-            #     await page.click("//button//span[text()='Continue']", timeout=3000)
+            # <-- Handle pre-page (Age Gate / Content Warning)
+            # [关键修复] 启用点击 "Continue" 按钮的逻辑
+            try:
+                continue_btn = page.locator("//button//span[text()='Continue']")
+                if await continue_btn.is_visible(timeout=5000):
+                    logger.debug("Found Content Warning, clicking Continue...")
+                    await continue_btn.click()
+                    await page.wait_for_load_state("networkidle")
+            except Exception:
+                pass # 没弹窗就忽略
 
             # 检查游戏是否已在库
             btn_list = page.locator("//aside//button")
-            aside_btn_count = await btn_list.count()
+            try:
+                aside_btn_count = await btn_list.count()
+            except TimeoutError:
+                # 如果页面加载太慢或被完全拦截
+                logger.warning(f"Failed to load game page buttons - {url=}")
+                continue
+
             texts = ""
             for i in range(aside_btn_count):
                 btn = btn_list.nth(i)
@@ -266,7 +279,12 @@ class EpicGames:
 
             # 检查是否为免费游戏
             purchase_btn = page.locator("//aside//button[@data-testid='purchase-cta-button']")
-            purchase_status = await purchase_btn.text_content()
+            try:
+                purchase_status = await purchase_btn.text_content(timeout=5000)
+            except TimeoutError:
+                logger.warning(f"Could not find purchase button - {url=}")
+                continue
+
             if "Buy Now" in purchase_status or "Get" not in purchase_status:
                 logger.warning(f"Not available for purchase - {url=}")
                 continue
@@ -274,14 +292,16 @@ class EpicGames:
             # 将免费游戏添加至购物车
             add_to_cart_btn = page.locator("//aside//button[@data-testid='add-to-cart-cta-button']")
             try:
-                text = await add_to_cart_btn.text_content()
+                text = await add_to_cart_btn.text_content(timeout=10000)
                 if text == "View In Cart":
                     logger.debug(f"🙌 Already in the shopping cart - {url=}")
                     has_pending_free_promotion = True
-                elif text == "Add To Cart":
+                elif text == "Add To Cart" or text == "Get": # 有时候是 Get
                     await add_to_cart_btn.click()
                     logger.debug(f"🙌 Add to the shopping cart - {url=}")
-                    await expect(add_to_cart_btn).to_have_text("View In Cart")
+                    # 等待按钮变成 "View In Cart" 或者直接跳转
+                    with suppress(TimeoutError):
+                         await expect(add_to_cart_btn).to_have_text("View In Cart", timeout=10000)
                     has_pending_free_promotion = True
 
             except Exception as err:
