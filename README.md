@@ -105,7 +105,7 @@ services:
       - EPIC_PASSWORD=your_password            # <--- 修改这里
       - GEMINI_API_KEY=sk-xxxxxxxxxxxx         # <--- 修改这里
       # 可选：修改中转地址
-      - GEMINI_BASE_URL=[https://aihubmix.com/v1](https://aihubmix.com/v1) 
+      - GEMINI_BASE_URL=[https://aihubmix.com](https://aihubmix.com) 
     # ...
 
 ```
