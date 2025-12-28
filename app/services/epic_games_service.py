@@ -115,8 +115,17 @@ class EpicAgent:
     async def _should_ignore_task(self) -> bool:
         self._ctx_cookies_is_available = False
         await self.page.goto(URL_CLAIM, wait_until="domcontentloaded")
-        status = await self.page.locator("//egs-navigation").get_attribute("isloggedin")
-        if status == "false":
+
+        # egs-navigation 的 isloggedin 可能异步更新，做短轮询避免瞬时误判
+        nav = self.page.locator("//egs-navigation")
+        status = None
+        for _i in range(30):  # 15s
+            status = await nav.get_attribute("isloggedin")
+            if status in ("true", "false"):
+                break
+            await self.page.wait_for_timeout(500)
+
+        if status != "true":
             logger.error("❌ context cookies is not available")
             return False
         self._ctx_cookies_is_available = True
