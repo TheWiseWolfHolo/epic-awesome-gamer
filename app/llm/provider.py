@@ -221,12 +221,32 @@ def _normalize_for_schema(
         if "challenge_prompt" in fields and "challenge_prompt" not in parsed:
             parsed["challenge_prompt"] = user_prompt or ""
 
+        def _as_point(val: Any) -> dict | None:
+            # Accept {"x":..,"y":..} or [x,y]
+            if isinstance(val, dict) and {"x", "y"} <= set(val.keys()):
+                return {"x": int(val["x"]), "y": int(val["y"])}
+            if isinstance(val, (list, tuple)) and len(val) == 2:
+                return {"x": int(val[0]), "y": int(val[1])}
+            return None
+
         # 允许直接输出 {start_point, end_point}
         if "paths" in fields and "paths" not in parsed and {"start_point", "end_point"} <= set(parsed.keys()):
             parsed = {
                 "challenge_prompt": parsed.get("challenge_prompt", user_prompt or ""),
                 "paths": [{"start_point": parsed["start_point"], "end_point": parsed["end_point"]}],
             }
+
+        # 允许输出 {start, end} / {from, to}（常见网关/模型输出形态）
+        if "paths" in fields and "paths" not in parsed:
+            start = parsed.get("start", parsed.get("from"))
+            end = parsed.get("end", parsed.get("to"))
+            sp = _as_point(start)
+            ep = _as_point(end)
+            if sp and ep:
+                parsed = {
+                    "challenge_prompt": parsed.get("challenge_prompt", user_prompt or ""),
+                    "paths": [{"start_point": sp, "end_point": ep}],
+                }
 
         # 允许直接输出 {x, y}
         if "points" in fields and "points" not in parsed and {"x", "y"} <= set(parsed.keys()):
