@@ -5,6 +5,7 @@
 # Description: 游戏商城控制句柄
 
 import json
+import time
 from contextlib import suppress
 from json import JSONDecodeError
 from typing import List
@@ -182,6 +183,59 @@ class EpicGames:
     def __init__(self, page: Page):
         self.page = page
         self._promotions: List[PromotionGame] = []
+        # 记录未能“确认入库”的 URL，最后会让任务失败，避免假成功
+        self._unverified_claims: List[str] = []
+
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        return (url or "").strip()
+
+    @staticmethod
+    async def _is_in_library(page: Page) -> bool:
+        """
+        基于商品页右侧按钮文本判断是否已入库（en-US: In Library / Owned）。
+        仅用于 UI 验证，不依赖 order history。
+        """
+        btn_list = page.locator("//aside//button")
+        try:
+            aside_btn_count = await btn_list.count()
+        except TimeoutError:
+            return False
+
+        texts = ""
+        for i in range(aside_btn_count):
+            with suppress(Exception):
+                btn = btn_list.nth(i)
+                t = await btn.text_content()
+                if t:
+                    texts += t
+
+        return ("In Library" in texts) or ("Owned" in texts)
+
+    async def _verify_in_library(self, page: Page, url: str, timeout_s: float = 45.0) -> bool:
+        """
+        反复打开/刷新商品页，等待 UI 变为 In Library。
+        用于确认结账/领取确实成功，而不是“盲推断”。
+        """
+        url = self._normalize_url(url)
+        if not url:
+            return False
+
+        deadline = time.monotonic() + float(timeout_s)
+        last_err: Exception | None = None
+
+        while time.monotonic() < deadline:
+            try:
+                await page.goto(url, wait_until="domcontentloaded")
+                if await self._is_in_library(page):
+                    return True
+            except Exception as e:
+                last_err = e
+            await page.wait_for_timeout(1500)
+
+        if last_err:
+            logger.debug(f"Verify in library failed with last error: {type(last_err).__name__}: {last_err}")
+        return False
 
     @staticmethod
     async def _agree_license(page: Page):
@@ -226,9 +280,10 @@ class EpicGames:
                 await accept.click()
                 return True
 
-    async def _handle_instant_checkout(self, page: Page):
-        """处理点击 'Get' 后弹出的即时结账窗口 (容错增强版)"""
-        logger.info("🚀 Triggering Instant Checkout Flow...")
+    async def _handle_instant_checkout(self, page: Page, product_url: str) -> bool:
+        """处理点击 'Get' 后弹出的即时结账窗口，并在最后强验证是否入库。"""
+        product_url = self._normalize_url(product_url)
+        logger.info("🚀 Triggering Instant Checkout Flow... url={}", product_url)
         agent = AgentV(page=page, agent_config=settings)
 
         try:
@@ -243,44 +298,64 @@ class EpicGames:
             await page.wait_for_timeout(3000)
             
             # 3. 尝试处理验证码 (增加容错)
-            # 关键修改：如果不需要验证码，wait_for_challenge 可能会报错，我们需要忽略这个错误
-            try:
-                logger.debug("Checking for CAPTCHA...")
-                await agent.wait_for_challenge()
-            except Exception as e:
-                # 这里的报错通常是因为没有弹出验证码，导致库找不到元素
-                # 我们将其视为“无验证码直接成功”，记录日志但不中断
-                logger.info(f"CAPTCHA detection skipped (Likely no CAPTCHA needed): {e}")
+            # 关键修改：不再“盲推断成功”，而是以“入库验证”为准。
+            # 某些情况下 challenge frame 会快速刷新/销毁，导致 Frame was detached；这里做轻量重试。
+            captcha_solved_or_not_needed = False
+            last_captcha_err: Exception | None = None
+            for attempt in range(3):
+                try:
+                    logger.debug("Checking for CAPTCHA... attempt={}", attempt + 1)
+                    await agent.wait_for_challenge()
+                    captcha_solved_or_not_needed = True
+                    break
+                except Exception as e:
+                    last_captcha_err = e
+                    msg = str(e)
+                    # 常见：没有验证码/找不到 frame（视为不需要验证码）
+                    if "Cannot find a valid challenge frame" in msg or "captcha payload" in msg:
+                        logger.info(f"CAPTCHA not detected (skip): {type(e).__name__}: {e}")
+                        captcha_solved_or_not_needed = True
+                        break
+                    # 常见：frame 刷新导致短暂 detach，等一会再试
+                    if "Frame was detached" in msg:
+                        logger.warning(f"CAPTCHA frame detached, retrying: {type(e).__name__}: {e}")
+                        await page.wait_for_timeout(1500)
+                        continue
+                    logger.warning(f"CAPTCHA solve error: {type(e).__name__}: {e}")
+                    break
 
-            # 4. 检查结果 (推断成功)
-            # 如果按钮已经消失或不可见，或者 iframe 已经关闭，说明下单成功了
-            try:
-                if not await payment_btn.is_visible():
-                     logger.success("🎉 Instant Checkout: Payment button disappeared (Success inferred)")
-                     return
-            except Exception:
-                # 如果定位器失效，说明 iframe 可能已经关了，这也是成功
-                logger.success("🎉 Instant Checkout: Iframe closed (Success inferred)")
-                return
+            if not captcha_solved_or_not_needed and last_captcha_err:
+                logger.warning(
+                    f"CAPTCHA solving did not finish cleanly: {type(last_captcha_err).__name__}: {last_captcha_err}"
+                )
 
-            # 如果按钮还在，可能需要二次确认
-            logger.warning("⚠️ Payment button still visible. Attempting one last click...")
-            with suppress(Exception):
-                await payment_btn.click(force=True)
-                await page.wait_for_timeout(2000)
-            
-            logger.success("Instant checkout flow finished (Blind Success).")
+            # 4. 强验证：回到商品页确认是否已入库
+            if product_url and await self._verify_in_library(page, product_url, timeout_s=60):
+                logger.success("🎉 Instant checkout verified: In Library")
+                return True
+
+            # 仍未入库：保留现场用于外层重试/失败处理
+            logger.error("❌ Instant checkout NOT verified (still not in library)")
+            return False
 
         except Exception as err:
             # 只要之前点击了按钮，就有可能已经成功入库。不要抛出致命错误。
             logger.warning(f"Instant checkout warning (Game might still be claimed): {err}")
             # 刷新页面以重置状态，防止影响下一个游戏
-            await page.reload()
+            with suppress(Exception):
+                await page.reload()
+            if product_url and await self._verify_in_library(page, product_url, timeout_s=30):
+                logger.success("🎉 Instant checkout verified after exception: In Library")
+                return True
+            return False
 
     async def add_promotion_to_cart(self, page: Page, urls: List[str]) -> bool:
         has_pending_cart_items = False
 
         for url in urls:
+            url = self._normalize_url(url)
+            if not url:
+                continue
             await page.goto(url, wait_until="load")
 
             # 1. 处理弹窗
@@ -305,7 +380,7 @@ class EpicGames:
                 btn = btn_list.nth(i)
                 texts += await btn.text_content()
 
-            if "In Library" in texts:
+            if "In Library" in texts or "Owned" in texts:
                 logger.success(f"Already in the library - {url=}")
                 continue
 
@@ -321,25 +396,42 @@ class EpicGames:
                 logger.warning(f"Not available for purchase - {url=}")
                 continue
 
-            # 4. 智能分支处理
+            # 4. 智能分支处理（Get: 即时结账 + 入库验证；Add To Cart: 走购物车）
             try:
-                target_btn = purchase_btn 
-                text = await target_btn.text_content()
-                
+                target_btn = purchase_btn
+                text = (await target_btn.text_content()) or ""
+
                 if "Get" in text:
-                    logger.debug(f"👉 Found 'Get' button, starting instant checkout - {url=}")
-                    await target_btn.click()
-                    await self._handle_instant_checkout(page)
-                    
+                    claimed = False
+                    for attempt in range(2):
+                        logger.debug(
+                            "👉 Found 'Get' button, starting instant checkout - attempt={}/2 url={}",
+                            attempt + 1,
+                            url,
+                        )
+                        await target_btn.click()
+                        claimed = await self._handle_instant_checkout(page, product_url=url)
+                        if claimed:
+                            break
+                        logger.warning(f"Instant checkout not verified, retrying - {url=}")
+                        with suppress(Exception):
+                            await page.reload(wait_until="domcontentloaded")
+                        target_btn = page.locator("//aside//button[@data-testid='purchase-cta-button']")
+
+                    if not claimed:
+                        self._unverified_claims.append(url)
+                        logger.error(f"❌ Claim not verified - {url=}")
+
                 elif "Add To Cart" in text:
                     logger.debug(f"🛒 Found 'Add To Cart' button - {url=}")
                     await target_btn.click()
                     with suppress(TimeoutError):
-                         await expect(target_btn).to_have_text("View In Cart", timeout=10000)
+                        await expect(target_btn).to_have_text("View In Cart", timeout=10000)
                     has_pending_cart_items = True
 
             except Exception as err:
-                logger.warning(f"Failed to process game - {err}")
+                logger.warning(f"Failed to process game - {type(err).__name__}: {err}")
+                self._unverified_claims.append(url)
                 continue
 
         return has_pending_cart_items
@@ -388,6 +480,9 @@ class EpicGames:
 
     @retry(retry=retry_if_exception_type(TimeoutError), stop=stop_after_attempt(2), reraise=True)
     async def collect_weekly_games(self, promotions: List[PromotionGame]):
+        # 清空上一轮残留
+        self._unverified_claims = []
+
         urls = [p.url for p in promotions]
         has_cart_items = await self.add_promotion_to_cart(self.page, urls)
 
@@ -398,5 +493,20 @@ class EpicGames:
                 logger.success("🎉 Successfully collected cart games")
             except TimeoutError:
                 logger.warning("Failed to collect cart games")
-        else:
-            logger.success("🎉 Process completed (Instant claimed or already owned)")
+        # 无论走哪条流程，最后都做一次“入库验证”，避免 Actions 误报成功
+        verify_failed: List[str] = []
+        for p in promotions:
+            url = self._normalize_url(p.url)
+            if not url:
+                continue
+            ok = await self._verify_in_library(self.page, url, timeout_s=30)
+            if not ok:
+                verify_failed.append(url)
+
+        # 合并失败列表（即时结账阶段失败 + 最终验证失败）
+        all_failed = list(dict.fromkeys(self._unverified_claims + verify_failed))
+        if all_failed:
+            logger.error("❌ Some games were NOT added to library (verified): {}", all_failed)
+            raise RuntimeError(f"Claim not verified for: {all_failed}")
+
+        logger.success("🎉 Process completed (verified in library)")
