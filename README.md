@@ -1,7 +1,7 @@
 <div align="center">
 
 # 🎮 Epic Awesome Gamer
-### (AiHubMix Enhanced Edition)
+### (LLM Compatible Edition)
 
 <img src="https://img.shields.io/static/v1?message=Python%203.12&color=3776AB&style=for-the-badge&logo=python&label=Build">
 <img src="https://img.shields.io/static/v1?message=Gemini%20Pro&color=4285F4&style=for-the-badge&logo=google&label=AI%20Model">
@@ -21,12 +21,13 @@
 
 ## 📖 项目简介
 
-**Epic Awesome Gamer (AiHubMix 版)** 是一款基于 Python 的全自动 Epic 游戏领取工具。
+**Epic Awesome Gamer** 是一款基于 Python 的全自动 Epic 游戏领取工具。
 
 本项目基于原作者 [**QIN2DIM/epic-awesome-gamer**](https://github.com/QIN2DIM/epic-awesome-gamer) 进行二次开发与深度重构。在此特别感谢原作者的开源贡献与灵感！
 
 **本修改版的主要改进：**
-* 集成了 **AiHubMix (Gemini)** 多模态大模型，通过底层补丁完美解决中转站 API 兼容性问题。
+* 集成了**可配置的 LLM 调用层**：支持 **OpenAI 兼容** & **Gemini 官方（native / OpenAI 兼容）** 三种模式，且**严禁私自改写 base_url**。
+* 增强了可观测性：启动 preflight + 非 JSON/HTML/WAF 响应会输出关键信息，排障不再只有 JSONDecodeError。
 * 专门针对 **GitHub Actions** 环境优化，无需本地挂机。
 * 新增 **即时结账 (Instant Checkout)** 和 **弹窗拦截** 逻辑，修复了无法领取 **特殊游戏** 的问题。
 
@@ -34,7 +35,7 @@
 
 | 模块 | 功能描述 |
 | :--- | :--- |
-| **🤖 AI 强力驱动** | 内置针对 `google-genai` SDK 的底层补丁，适配 **AiHubMix** 等中转站，支持 Base64 图片直传，**0 报错**通过 hCaptcha 验证。 |
+| **🤖 AI 强力驱动** | 内置可配置的 LLM 调用层，适配任意中转站/网关 `base_url`，支持 Base64 图片直传，**0 报错**通过 hCaptcha 验证。 |
 | **⚡️ 即时结账支持** | 独家支持 **Instant Checkout** 流程。自动识别点击 "Get" 后弹出的支付窗口，不再因为找不到购物车而漏领。 |
 | **🛡️ 智能弹窗处理** | 自动识别并处理 **"内容警告 (Content Warning)"** 和年龄限制弹窗，确保脚本不会卡在确认页面。 |
 | **📦 全内容收集** | 移除了原版的捆绑包过滤逻辑，无论是普通游戏还是 **Bundles**，所有免费内容一网打尽。 |
@@ -59,7 +60,7 @@
 | :--- | :---: | :--- | :--- |
 | `EPIC_EMAIL` | ✅ | Epic 账号邮箱 (**必须关闭 2FA**) | `myname@email.com` |
 | `EPIC_PASSWORD` | ✅ | Epic 账号密码 | `password123` |
-| `GEMINI_API_KEY` | ✅ | [AiHubMix](https://aihubmix.com/?aff=mvyG) 或 Google 的 API Key | `sk-xxxxxxxx` |
+| `GEMINI_API_KEY` | ✅ | Gemini 官方 / OpenAI 兼容服务的 API Key | `sk-xxxxxxxx` |
 
 ### 3. 可选配置 (Advanced)
 
@@ -145,8 +146,8 @@ docker compose up -d
 
 **A:** 请确保你使用的是本仓库的最新代码。
 
-* 本项目内置了 `utils.py` 补丁，会拦截 Google SDK 的文件上传行为，将其转换为 **Inline Base64** 数据。
-* 这完美绕过了中转站对文件上传 API 的限制。
+* 本项目使用自定义 `app/llm` 调用层，图片通过 **Inline Base64** 发送，不依赖 Gemini 的文件上传接口。
+* 若被 WAF/Cloudflare 返回 HTML，日志会打印 `status_code` / `content-type` / `body_snippet`，方便快速定位是 401/403/5xx 还是网关拦截。
 
 </details>
 

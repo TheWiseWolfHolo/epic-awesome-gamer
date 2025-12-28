@@ -24,15 +24,15 @@ HCAPTCHA_DIR = VOLUMES_DIR.joinpath("hcaptcha")
 class EpicSettings(AgentConfig):
     model_config = SettingsConfigDict(env_file=".env", env_ignore_empty=True, extra="ignore")
 
-    # [基础配置] AiHubMix 必须使用 SecretStr 类型
+    # [基础配置] API Key 建议使用 SecretStr 类型
     GEMINI_API_KEY: SecretStr | None = Field(
         default_factory=lambda: os.getenv("GEMINI_API_KEY"),
-        description="AiHubMix 的令牌",
+        description="LLM 的 API Key（Gemini 官方 / OpenAI 兼容均可）",
     )
     
     GEMINI_BASE_URL: str = Field(
         default=os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com"),
-        description="中转地址",
+        description="LLM Base URL（兼容旧变量；不会被代码私自改写）",
     )
     
     GEMINI_MODEL: str = Field(
