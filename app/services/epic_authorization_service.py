@@ -56,15 +56,29 @@ class EpicAuthorization:
 
         # == 账号长期不登录需要做的额外验证 == #
 
-        while self._is_refresh_csrf_signal.empty() and btn_ids:
+        # 这一步是“尽力而为”的兜底，不应无限循环阻塞主流程
+        deadline = time.time() + 30  # 最多尝试 30s
+        idle_rounds = 0
+
+        while time.time() < deadline and self._is_refresh_csrf_signal.empty() and btn_ids:
             await self.page.wait_for_timeout(500)
             action_chains = btn_ids.copy()
+            clicked_any = False
             for action in action_chains:
                 with suppress(Exception):
                     reminder_btn = self.page.locator(action)
                     await expect(reminder_btn).to_be_visible(timeout=1000)
                     await reminder_btn.click(timeout=1000)
                     btn_ids.remove(action)
+                    clicked_any = True
+
+            if clicked_any:
+                idle_rounds = 0
+            else:
+                idle_rounds += 1
+                # 连续多轮都没任何按钮可点，直接结束（可能根本不需要该验证）
+                if idle_rounds >= 10:
+                    break
 
     async def _login(self) -> bool | None:
         # 尽可能早地初始化机器人
@@ -83,9 +97,20 @@ class EpicAuthorization:
             await email_input.clear()
             await email_input.type(settings.EPIC_EMAIL)
 
+            async def _safe_click(selector: str):
+                # Playwright click 在某些情况下仍可能卡住；失败时退化为 DOM click
+                try:
+                    await self.page.click(selector, no_wait_after=True, force=True, timeout=15000)
+                except Exception as e:
+                    logger.warning(f"Safe click fallback - selector={selector} err={type(e).__name__}: {e}")
+                    await self.page.evaluate(
+                        "(sel) => { const el = document.querySelector(sel); if (el) el.click(); }",
+                        selector,
+                    )
+
             # 2. 点击继续按钮
             # Playwright 的 click 可能会等待“导航完成”导致超时；这里不等待，改为显式等待下一步元素出现
-            await self.page.click("#continue", no_wait_after=True, force=True, timeout=15000)
+            await _safe_click("#continue")
 
             # 3. 输入密码
             password_input = self.page.locator("#password")
@@ -95,7 +120,7 @@ class EpicAuthorization:
 
             # 4. 点击登录按钮，触发人机挑战值守监听器
             # Active hCaptcha checkbox
-            await self.page.click("#sign-in", no_wait_after=True, force=True, timeout=15000)
+            await _safe_click("#sign-in")
 
             # 并发等待：登录成功信号 vs 验证码任务（避免 90s 过早超时导致“已快成功但被我们中断”）
             captcha_task = asyncio.create_task(agent.wait_for_challenge())
@@ -150,11 +175,18 @@ class EpicAuthorization:
                     await t
             logger.success("Login success")
 
-            await asyncio.wait_for(self._handle_right_account_validation(), timeout=60)
-            logger.success("Right account validation success")
+            # 该验证是可选步骤：超时/失败不影响后续领取逻辑
+            try:
+                await asyncio.wait_for(self._handle_right_account_validation(), timeout=60)
+                logger.success("Right account validation success")
+            except asyncio.TimeoutError:
+                logger.warning("Right account validation timeout, continue")
+            except Exception as e:
+                logger.warning(f"Right account validation skipped: {type(e).__name__}: {e}")
+
             return True
         except Exception as err:
-            logger.warning(f"{err}")
+            logger.warning(f"{type(err).__name__}: {err}")
             sr = SCREENSHOTS_DIR.joinpath("authorization")
             sr.mkdir(parents=True, exist_ok=True)
             await self.page.screenshot(path=sr.joinpath(f"login-{int(time.time())}.png"))
