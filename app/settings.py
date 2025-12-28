@@ -104,6 +104,10 @@ class EpicSettings(AgentConfig):
         default=float(os.getenv("RESPONSE_TIMEOUT", "90")),
         description="等待验证码服务响应超时（秒），默认 90，可用 env 覆盖",
     )
+    CAPTCHA_PAYLOAD_TIMEOUT: float = Field(
+        default=float(os.getenv("CAPTCHA_PAYLOAD_TIMEOUT", os.getenv("RESPONSE_TIMEOUT", "90"))),
+        description="等待 hCaptcha getcaptcha payload 的超时（秒），默认 90，可用 env 覆盖",
+    )
 
     cache_dir: Path = HCAPTCHA_DIR.joinpath(".cache")
     challenge_dir: Path = HCAPTCHA_DIR.joinpath(".challenge")
@@ -159,3 +163,133 @@ def _apply_llm_provider_patch() -> None:
 
 
 _apply_llm_provider_patch()
+
+
+def _apply_hcaptcha_compat_patch() -> None:
+    """
+    修复 hcaptcha-challenger 上游硬编码导致的不稳定：
+    - getcaptcha payload 等待超时写死 30s（在 Actions 环境容易不够）
+    - challenge iframe 域名写死 newassets.hcaptcha.com（Epic/区域/版本变动会找不到 frame）
+    """
+    try:
+        import asyncio
+        from contextlib import suppress
+
+        from hcaptcha_challenger.agent import challenger as hc
+        from hcaptcha_challenger.models import RequestType, ChallengeTypeEnum
+
+        # 1) 放宽 iframe selector（支持任意 hcaptcha 子域）
+        orig_arm_init = hc.RoboticArm.__init__
+
+        def patched_arm_init(self, page, config):  # type: ignore[no-redef]
+            orig_arm_init(self, page, config)
+            self._checkbox_selector = (
+                "//iframe[contains(@src,'hcaptcha.com') and contains(@src, 'frame=checkbox')]"
+            )
+            self._challenge_selector = (
+                "//iframe[contains(@src,'hcaptcha.com') and contains(@src, 'frame=challenge')]"
+            )
+
+        hc.RoboticArm.__init__ = patched_arm_init  # type: ignore[method-assign]
+
+        # 2) 放宽 frame.url 匹配（避免只认 newassets.hcaptcha.com）
+        async def patched_get_challenge_frame_locator(self) -> object | None:  # Frame | None
+            def is_challenge_url(url: str) -> bool:
+                u = (url or "").lower()
+                return ("hcaptcha.com/captcha" in u) and ("frame=challenge" in u)
+
+            # 深度优先查找
+            def find_recursive(frame, depth: int, max_depth: int):
+                if depth >= max_depth:
+                    return None
+                for child in getattr(frame, "child_frames", []) or []:
+                    if is_challenge_url(getattr(child, "url", "")):
+                        return child
+                    found = find_recursive(child, depth + 1, max_depth)
+                    if found is not None:
+                        return found
+                return None
+
+            candidate = find_recursive(self.page.main_frame, 0, 6)
+            if candidate is not None:
+                with suppress(Exception):
+                    challenge_view = candidate.locator("//div[@class='challenge-view']")
+                    if await challenge_view.is_visible(timeout=1500):
+                        return candidate
+                return candidate
+
+            # 扫描全量 frames
+            for frame in self.page.frames:
+                if is_challenge_url(getattr(frame, "url", "")):
+                    with suppress(Exception):
+                        challenge_view = frame.locator("//div[@class='challenge-view']")
+                        if await challenge_view.is_visible(timeout=1500):
+                            return frame
+                    return frame
+
+            hc.logger.error("Cannot find a valid challenge frame")
+            return None
+
+        hc.RoboticArm.get_challenge_frame_locator = patched_get_challenge_frame_locator  # type: ignore[method-assign]
+
+        # 3) 让 payload 等待超时可配置（默认跟随 settings.CAPTCHA_PAYLOAD_TIMEOUT）
+        async def patched_review_challenge_type(self) -> object:  # RequestType | ChallengeTypeEnum
+            try:
+                timeout = float(getattr(self.config, "CAPTCHA_PAYLOAD_TIMEOUT", 30.0))
+                self._captcha_payload = await asyncio.wait_for(
+                    self._captcha_payload_queue.get(), timeout=timeout
+                )
+                await self.page.wait_for_timeout(500)
+            except asyncio.TimeoutError:
+                hc.logger.error("Wait for captcha payload to timeout")
+                self._captcha_payload = None
+
+            self.robotic_arm.signal_crumb_count = None
+            self.robotic_arm.captcha_payload = None
+            if not self._captcha_payload:
+                return await self.robotic_arm.check_challenge_type()
+
+            try:
+                request_type = self._captcha_payload.request_type
+                tasklist = self._captcha_payload.tasklist
+                tasklist_length = len(tasklist)
+                self.robotic_arm.captcha_payload = self._captcha_payload
+                match request_type:
+                    case RequestType.IMAGE_LABEL_BINARY:
+                        self.robotic_arm.signal_crumb_count = int(tasklist_length / 9)
+                        return RequestType.IMAGE_LABEL_BINARY
+                    case RequestType.IMAGE_LABEL_AREA_SELECT:
+                        self.robotic_arm.signal_crumb_count = tasklist_length
+                        max_shapes = self._captcha_payload.request_config.max_shapes_per_image
+                        if not isinstance(max_shapes, int):
+                            return await self.robotic_arm.check_challenge_type()
+                        return (
+                            ChallengeTypeEnum.IMAGE_LABEL_SINGLE_SELECT
+                            if max_shapes == 1
+                            else ChallengeTypeEnum.IMAGE_LABEL_MULTI_SELECT
+                        )
+                    case RequestType.IMAGE_DRAG_DROP:
+                        self.robotic_arm.signal_crumb_count = tasklist_length
+                        return (
+                            ChallengeTypeEnum.IMAGE_DRAG_SINGLE
+                            if len(tasklist[0].entities) == 1
+                            else ChallengeTypeEnum.IMAGE_DRAG_MULTI
+                        )
+
+                hc.logger.warning(f"Unknown request_type: {request_type=}")
+            except Exception as err:
+                hc.logger.error(f"Error parsing challenge type: {err}")
+
+            return await self.robotic_arm.check_challenge_type()
+
+        hc.AgentV._review_challenge_type = patched_review_challenge_type  # type: ignore[method-assign]
+
+        logger.info(
+            "🧩 hcaptcha-challenger 兼容补丁已应用 | payload_timeout={}s",
+            settings.CAPTCHA_PAYLOAD_TIMEOUT,
+        )
+    except Exception as e:
+        logger.warning(f"⚠️ hcaptcha-challenger 兼容补丁加载失败: {e}")
+
+
+_apply_hcaptcha_compat_patch()

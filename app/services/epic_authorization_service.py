@@ -127,7 +127,17 @@ class EpicAuthorization:
                 try:
                     await asyncio.wait_for(login_task, timeout=60)
                 except asyncio.TimeoutError:
-                    raise asyncio.TimeoutError("Login success signal timeout after captcha task finished")
+                    # 兜底：有时登录成功但 analytics 信号没抓到，回到商店页检查 isloggedin
+                    with suppress(Exception):
+                        await self.page.goto(URL_CLAIM, wait_until="domcontentloaded")
+                        nav = self.page.locator("//egs-navigation")
+                        status = await nav.get_attribute("isloggedin")
+                        if status == "true":
+                            logger.success("Login inferred by isloggedin=true (fallback)")
+                        else:
+                            raise asyncio.TimeoutError(
+                                "Login success signal timeout after captcha task finished"
+                            )
 
             # case 3) 都没完成：超时
             else:
