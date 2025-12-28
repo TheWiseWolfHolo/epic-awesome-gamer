@@ -85,7 +85,7 @@ class EpicAuthorization:
 
             # 2. 点击继续按钮
             # Playwright 的 click 可能会等待“导航完成”导致超时；这里不等待，改为显式等待下一步元素出现
-            await self.page.click("#continue", no_wait_after=True)
+            await self.page.click("#continue", no_wait_after=True, force=True, timeout=15000)
 
             # 3. 输入密码
             password_input = self.page.locator("#password")
@@ -95,23 +95,49 @@ class EpicAuthorization:
 
             # 4. 点击登录按钮，触发人机挑战值守监听器
             # Active hCaptcha checkbox
-            await self.page.click("#sign-in", no_wait_after=True)
+            await self.page.click("#sign-in", no_wait_after=True, force=True, timeout=15000)
 
-            # Active hCaptcha challenge（不要阻塞登录成功信号：有时不会出现验证码）
+            # 并发等待：登录成功信号 vs 验证码任务（避免 90s 过早超时导致“已快成功但被我们中断”）
             captcha_task = asyncio.create_task(agent.wait_for_challenge())
-            with suppress(Exception):
-                # 若验证码任务提前失败，记录一下但不立刻终止（真正是否登录成功由后续信号决定）
-                if captcha_task.done():
+            login_task = asyncio.create_task(self._is_login_success_signal.get())
+
+            overall_timeout = float(getattr(settings, "EXECUTION_TIMEOUT", 120.0)) + float(
+                getattr(settings, "RESPONSE_TIMEOUT", 30.0)
+            ) + 60.0
+
+            done, pending = await asyncio.wait(
+                {captcha_task, login_task},
+                timeout=overall_timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # case 1) 先拿到登录成功
+            if login_task in done:
+                # 登录成功后取消验证码任务（若仍在跑）
+                if not captcha_task.done():
+                    captcha_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await captcha_task
+
+            # case 2) 先结束验证码任务（成功或失败），再给登录一点时间完成跳转
+            elif captcha_task in done:
+                with suppress(Exception):
                     captcha_task.result()
 
-            # Wait for the page to redirect
-            await asyncio.wait_for(self._is_login_success_signal.get(), timeout=90)
+                try:
+                    await asyncio.wait_for(login_task, timeout=60)
+                except asyncio.TimeoutError:
+                    raise asyncio.TimeoutError("Login success signal timeout after captcha task finished")
 
-            # 登录成功后取消验证码任务（若仍在跑）
-            if not captcha_task.done():
-                captcha_task.cancel()
+            # case 3) 都没完成：超时
+            else:
+                raise asyncio.TimeoutError("Login timeout (captcha/login task not finished)")
+
+            # 收尾：取消仍挂起的任务
+            for t in pending:
+                t.cancel()
                 with suppress(asyncio.CancelledError):
-                    await captcha_task
+                    await t
             logger.success("Login success")
 
             await asyncio.wait_for(self._handle_right_account_validation(), timeout=60)

@@ -92,6 +92,19 @@ class EpicSettings(AgentConfig):
     EPIC_PASSWORD: SecretStr = Field(default_factory=lambda: os.getenv("EPIC_PASSWORD"))
     DISABLE_BEZIER_TRAJECTORY: bool = Field(default=True)
 
+    # ================================
+    # 超时（允许通过环境变量覆盖）
+    # - 上游默认 RESPONSE_TIMEOUT=30 在 Actions 环境容易不够
+    # ================================
+    EXECUTION_TIMEOUT: float = Field(
+        default=float(os.getenv("EXECUTION_TIMEOUT", "180")),
+        description="验证码整体执行超时（秒），默认 180，可用 env 覆盖",
+    )
+    RESPONSE_TIMEOUT: float = Field(
+        default=float(os.getenv("RESPONSE_TIMEOUT", "90")),
+        description="等待验证码服务响应超时（秒），默认 90，可用 env 覆盖",
+    )
+
     cache_dir: Path = HCAPTCHA_DIR.joinpath(".cache")
     challenge_dir: Path = HCAPTCHA_DIR.joinpath(".challenge")
     captcha_response_dir: Path = HCAPTCHA_DIR.joinpath(".captcha")
