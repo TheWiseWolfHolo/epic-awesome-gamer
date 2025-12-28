@@ -163,80 +163,77 @@ class EpicAuthorization:
             # Active hCaptcha checkbox
             await _safe_click("#sign-in")
 
-            # 并发等待：登录成功信号 vs 验证码任务
-            # 核心策略：captcha 异常 ≠ 登录失败，必须用 API 探测确认
+            # ========================================================
+            # 核心策略：主动轮询登录态 + captcha 作为后台任务
+            # hCaptcha 可能：1)静默放行 2)要求解题 3)直接阻止
+            # 无论哪种情况，我们都要持续检查是否已登录
+            # ========================================================
             captcha_task = asyncio.create_task(agent.wait_for_challenge())
-            login_task = asyncio.create_task(self._is_login_success_signal.get())
-
-            overall_timeout = float(getattr(settings, "EXECUTION_TIMEOUT", 120.0)) + float(
-                getattr(settings, "RESPONSE_TIMEOUT", 30.0)
-            ) + 60.0
+            login_signal_task = asyncio.create_task(self._is_login_success_signal.get())
 
             login_confirmed = False
-            captcha_error: Exception | None = None
+            max_probe_time = 120.0  # 最多探测 2 分钟
 
+            async def _probe_login_loop():
+                """持续探测登录态，直到成功或超时"""
+                start = asyncio.get_event_loop().time()
+                probe_count = 0
+                while asyncio.get_event_loop().time() - start < max_probe_time:
+                    probe_count += 1
+                    # 每 5 秒探测一次 API
+                    if await self._probe_account_logged_in(timeout_ms=8000):
+                        logger.success(f"Login confirmed by API probe (attempt #{probe_count})")
+                        return True
+                    await asyncio.sleep(5)
+                return False
+
+            probe_task = asyncio.create_task(_probe_login_loop())
+
+            # 等待任一任务完成：登录信号 / API 探测成功 / captcha 完成
             done, pending = await asyncio.wait(
-                {captcha_task, login_task},
-                timeout=overall_timeout,
+                {captcha_task, login_signal_task, probe_task},
+                timeout=max_probe_time + 30,
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
-            # case 1) 先拿到登录成功信号
-            if login_task in done:
+            # 检查结果
+            if login_signal_task in done:
+                logger.success("Login confirmed by analytics signal")
                 login_confirmed = True
-                if not captcha_task.done():
-                    captcha_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await captcha_task
-
-            # case 2) 先结束验证码任务（成功或失败）
+            elif probe_task in done:
+                try:
+                    login_confirmed = probe_task.result()
+                except Exception:
+                    pass
             elif captcha_task in done:
-                # 捕获 captcha 异常，但不立刻判定登录失败
+                # captcha 完成了，再给一点时间让登录完成
                 try:
                     captcha_task.result()
-                    logger.debug("Captcha task completed without error")
+                    logger.debug("Captcha task completed, waiting for login confirmation...")
                 except Exception as e:
-                    captcha_error = e
-                    logger.warning(f"Captcha task error (will probe login anyway): {type(e).__name__}")
-
-                # 等一会儿看登录信号是否到来
-                try:
-                    await asyncio.wait_for(login_task, timeout=30)
+                    logger.warning(f"Captcha task error: {type(e).__name__}")
+                # 等待登录信号或 API 确认
+                await asyncio.sleep(3)
+                if await self._probe_account_logged_in(timeout_ms=15000):
+                    logger.success("Login confirmed by API probe after captcha")
                     login_confirmed = True
-                except asyncio.TimeoutError:
-                    pass
 
-            # case 3) 都没完成：超时
-            else:
-                logger.warning("Both captcha and login tasks timed out")
-
-            # 收尾：取消仍挂起的任务
+            # 取消所有挂起的任务
             for t in pending:
                 t.cancel()
                 with suppress(asyncio.CancelledError):
                     await t
 
-            # 核心：无论 captcha 是否成功，都用 API 探测确认登录态
+            # 最终确认
             if not login_confirmed:
-                logger.debug("No login signal received, probing account API...")
-                # 等待一小段时间让后台完成登录（有时候 Epic 静默通过）
+                # 最后一次尝试
                 await self.page.wait_for_timeout(3000)
-                if await self._probe_account_logged_in(timeout_ms=15000):
-                    logger.success("Login confirmed by account API probe (no signal received)")
+                if await self._probe_account_logged_in(timeout_ms=20000):
+                    logger.success("Login confirmed by final API probe")
                     login_confirmed = True
 
             if not login_confirmed:
-                # 最后尝试：回到 store 页检查 isloggedin
-                with suppress(Exception):
-                    await self.page.goto(URL_CLAIM, wait_until="domcontentloaded")
-                    if await self._wait_store_isloggedin_true(timeout_s=15):
-                        logger.success("Login confirmed by store isloggedin=true")
-                        login_confirmed = True
-
-            if not login_confirmed:
-                if captcha_error:
-                    raise captcha_error
-                raise RuntimeError("Login failed: no confirmation signal and API probe failed")
+                raise RuntimeError("Login failed: all probes returned negative")
 
             logger.success("Login success")
 
