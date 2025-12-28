@@ -17,6 +17,7 @@ from playwright.async_api import expect, Page, Response
 from settings import SCREENSHOTS_DIR, settings
 
 URL_CLAIM = "https://store.epicgames.com/en-US/free-games"
+URL_ORDER_HISTORY = "https://www.epicgames.com/account/v2/payment/ajaxGetOrderHistory"
 
 
 class EpicAuthorization:
@@ -46,6 +47,26 @@ class EpicAuthorization:
             self.page.url,
         )
         return False
+
+    async def _probe_account_logged_in(self, timeout_ms: float = 15000) -> bool:
+        """
+        用“账号 JSON API”探测是否已登录，比 store 页的 isloggedin 更可靠。
+        - 已登录：通常返回 JSON，包含 orders 字段
+        - 未登录：可能 302/401/403，或返回 HTML
+        """
+        try:
+            resp = await self.page.request.get(URL_ORDER_HISTORY, timeout=timeout_ms)
+            if not resp.ok:
+                return False
+            headers = resp.headers or {}
+            content_type = (headers.get("content-type") or "").lower()
+            if "application/json" not in content_type:
+                return False
+            data = await resp.json()
+            return isinstance(data, dict) and ("orders" in data)
+        except Exception as e:
+            logger.debug(f"Probe account login failed: {type(e).__name__}: {e}")
+            return False
 
     async def _on_response_anything(self, r: Response):
         if r.request.method != "POST" or "talon" in r.url:
@@ -172,15 +193,13 @@ class EpicAuthorization:
                 try:
                     await asyncio.wait_for(login_task, timeout=60)
                 except asyncio.TimeoutError:
-                    # 兜底：有时登录成功但 analytics 信号没抓到，回到商店页检查 isloggedin
-                    with suppress(Exception):
-                        await self.page.goto(URL_CLAIM, wait_until="domcontentloaded")
-                        if await self._wait_store_isloggedin_true(timeout_s=30):
-                            logger.success("Login inferred by isloggedin=true (fallback)")
-                        else:
-                            raise asyncio.TimeoutError(
-                                "Login success signal timeout after captcha task finished"
-                            )
+                    # 兜底：有时 analytics 信号没抓到，用账号接口探测是否已登录
+                    if await self._probe_account_logged_in(timeout_ms=15000):
+                        logger.success("Login inferred by account API probe (fallback)")
+                    else:
+                        raise asyncio.TimeoutError(
+                            "Login success signal timeout after captcha task finished"
+                        )
 
             # case 3) 都没完成：超时
             else:
@@ -216,15 +235,15 @@ class EpicAuthorization:
         for _ in range(3):
             await self.page.goto(URL_CLAIM, wait_until="domcontentloaded")
 
-            if await self._wait_store_isloggedin_true(timeout_s=30):
-                logger.success("Epic Games is already logged in")
+            # 优先使用账号接口探测登录态，避免 store 页 isloggedin 长期不更新导致反复重登
+            if await self._probe_account_logged_in(timeout_ms=15000):
+                logger.success("Epic Games is already logged in (account API probe)")
                 return True
 
             if await self._login():
-                # 登录成功后再回到商店页确认一次（避免 analytics 信号误判 / store 域未同步）
-                with suppress(Exception):
-                    await self.page.goto(URL_CLAIM, wait_until="domcontentloaded")
-                if await self._wait_store_isloggedin_true(timeout_s=30):
+                # 登录成功后用账号接口确认（比 store isloggedin 更可靠）
+                if await self._probe_account_logged_in(timeout_ms=20000):
                     return True
+                logger.warning("Login success but account API probe failed, will retry login")
 
         return False

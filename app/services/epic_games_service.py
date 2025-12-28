@@ -27,6 +27,7 @@ URL_LOGIN = (
 )
 URL_CART = "https://store.epicgames.com/en-US/cart"
 URL_CART_SUCCESS = "https://store.epicgames.com/en-US/cart/success"
+URL_ORDER_HISTORY = "https://www.epicgames.com/account/v2/payment/ajaxGetOrderHistory"
 
 
 URL_PROMOTIONS = "https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions"
@@ -117,18 +118,24 @@ class EpicAgent:
         self._ctx_cookies_is_available = False
         await self.page.goto(URL_CLAIM, wait_until="domcontentloaded")
 
-        # egs-navigation 的 isloggedin 可能会先是 "false" 后续再异步变成 "true"
-        # 不能在读到 "false" 时立刻判定未登录，否则会出现“已登录但误判未登录”的情况
-        nav = self.page.locator("//egs-navigation")
+        # 以账号 JSON API 探测登录态，避免 store 页 isloggedin 不更新导致误判
         status = None
-        for _i in range(60):  # 30s
-            with suppress(Exception):
-                status = await nav.get_attribute("isloggedin")
-            if status == "true":
-                break
-            await self.page.wait_for_timeout(500)
+        with suppress(Exception):
+            nav = self.page.locator("//egs-navigation")
+            status = await nav.get_attribute("isloggedin")
 
-        if status != "true":
+        logged_in = False
+        try:
+            resp = await self.page.request.get(URL_ORDER_HISTORY, timeout=15000)
+            if resp.ok:
+                content_type = (resp.headers.get("content-type") or "").lower()
+                if "application/json" in content_type:
+                    data = await resp.json()
+                    logged_in = isinstance(data, dict) and ("orders" in data)
+        except Exception:
+            logged_in = False
+
+        if not logged_in:
             cookie_count = 0
             cookie_names: List[str] = []
             with suppress(Exception):
@@ -138,7 +145,7 @@ class EpicAgent:
                     c.get("name") for c in cookies if isinstance(c, dict) and c.get("name")
                 ]
             logger.error(
-                "❌ not logged in on store page | isloggedin={} url={} cookie_count={} cookie_names_sample={}",
+                "❌ not logged in (account API probe failed) | store_isloggedin={} url={} cookie_count={} cookie_names_sample={}",
                 status,
                 self.page.url,
                 cookie_count,
