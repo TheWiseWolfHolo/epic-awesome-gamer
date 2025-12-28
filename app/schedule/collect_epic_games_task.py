@@ -87,8 +87,8 @@ async def collect_epic_games_task():
         agent = EpicAuthorization(page)
         await agent.invoke()
 
-        game_page = await browser.new_page()
-        agent = EpicAgent(game_page)
+        # 复用同一个 page：Epic 登录态可能依赖 sessionStorage/页面级状态，新开 tab 容易误判 isloggedin=false
+        agent = EpicAgent(page)
         await agent.collect_epic_games()
 
         with suppress(Exception):

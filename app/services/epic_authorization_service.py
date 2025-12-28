@@ -27,6 +27,26 @@ class EpicAuthorization:
         self._is_login_success_signal = asyncio.Queue()
         self._is_refresh_csrf_signal = asyncio.Queue()
 
+    async def _wait_store_isloggedin_true(self, timeout_s: float = 30.0) -> bool:
+        """
+        Epic 的 <egs-navigation isloggedin> 可能先为 "false" 再异步更新为 "true"。
+        这里统一等待直到观测到 "true"，避免瞬时误判。
+        """
+        nav = self.page.locator("//egs-navigation")
+        status = None
+        for _i in range(max(1, int(timeout_s * 2))):
+            with suppress(Exception):
+                status = await nav.get_attribute("isloggedin")
+            if status == "true":
+                return True
+            await self.page.wait_for_timeout(500)
+        logger.debug(
+            "Store login not ready | isloggedin={} url={}",
+            status,
+            self.page.url,
+        )
+        return False
+
     async def _on_response_anything(self, r: Response):
         if r.request.method != "POST" or "talon" in r.url:
             return
@@ -155,9 +175,7 @@ class EpicAuthorization:
                     # 兜底：有时登录成功但 analytics 信号没抓到，回到商店页检查 isloggedin
                     with suppress(Exception):
                         await self.page.goto(URL_CLAIM, wait_until="domcontentloaded")
-                        nav = self.page.locator("//egs-navigation")
-                        status = await nav.get_attribute("isloggedin")
-                        if status == "true":
+                        if await self._wait_store_isloggedin_true(timeout_s=30):
                             logger.success("Login inferred by isloggedin=true (fallback)")
                         else:
                             raise asyncio.TimeoutError(
@@ -198,20 +216,15 @@ class EpicAuthorization:
         for _ in range(3):
             await self.page.goto(URL_CLAIM, wait_until="domcontentloaded")
 
-            # egs-navigation 的 isloggedin 可能异步更新，做短轮询避免瞬时误判
-            nav = self.page.locator("//egs-navigation")
-            status = None
-            for _i in range(30):  # 15s
-                status = await nav.get_attribute("isloggedin")
-                if status in ("true", "false"):
-                    break
-                await self.page.wait_for_timeout(500)
-
-            if status == "true":
+            if await self._wait_store_isloggedin_true(timeout_s=30):
                 logger.success("Epic Games is already logged in")
                 return True
 
             if await self._login():
-                return True
+                # 登录成功后再回到商店页确认一次（避免 analytics 信号误判 / store 域未同步）
+                with suppress(Exception):
+                    await self.page.goto(URL_CLAIM, wait_until="domcontentloaded")
+                if await self._wait_store_isloggedin_true(timeout_s=30):
+                    return True
 
         return False

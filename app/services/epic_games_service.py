@@ -116,17 +116,33 @@ class EpicAgent:
         self._ctx_cookies_is_available = False
         await self.page.goto(URL_CLAIM, wait_until="domcontentloaded")
 
-        # egs-navigation 的 isloggedin 可能异步更新，做短轮询避免瞬时误判
+        # egs-navigation 的 isloggedin 可能会先是 "false" 后续再异步变成 "true"
+        # 不能在读到 "false" 时立刻判定未登录，否则会出现“已登录但误判未登录”的情况
         nav = self.page.locator("//egs-navigation")
         status = None
-        for _i in range(30):  # 15s
-            status = await nav.get_attribute("isloggedin")
-            if status in ("true", "false"):
+        for _i in range(60):  # 30s
+            with suppress(Exception):
+                status = await nav.get_attribute("isloggedin")
+            if status == "true":
                 break
             await self.page.wait_for_timeout(500)
 
         if status != "true":
-            logger.error("❌ context cookies is not available")
+            cookie_count = 0
+            cookie_names: List[str] = []
+            with suppress(Exception):
+                cookies = await self.page.context.cookies(URL_CLAIM)
+                cookie_count = len(cookies)
+                cookie_names = [
+                    c.get("name") for c in cookies if isinstance(c, dict) and c.get("name")
+                ]
+            logger.error(
+                "❌ not logged in on store page | isloggedin={} url={} cookie_count={} cookie_names_sample={}",
+                status,
+                self.page.url,
+                cookie_count,
+                cookie_names[:10],
+            )
             return False
         self._ctx_cookies_is_available = True
         await self._check_orders()
