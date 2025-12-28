@@ -40,6 +40,33 @@ class EpicSettings(AgentConfig):
         description="模型名称",
     )
 
+    # ==========================================================
+    # 关键：让“用户填什么模型就用什么模型”（不限制模型名）
+    # - hcaptcha-challenger 上游对这些字段做了 Literal 白名单类型
+    # - 这里强制覆盖为 str，并默认统一使用 GEMINI_MODEL
+    # - 如需单独微调，也可分别设置同名环境变量覆盖
+    # ==========================================================
+    CHALLENGE_CLASSIFIER_MODEL: str = Field(
+        default_factory=lambda: os.getenv("CHALLENGE_CLASSIFIER_MODEL")
+        or os.getenv("GEMINI_MODEL", "gemini-2.5-pro"),
+        description="验证码任务分类模型（默认跟随 GEMINI_MODEL，可任意字符串）",
+    )
+    IMAGE_CLASSIFIER_MODEL: str = Field(
+        default_factory=lambda: os.getenv("IMAGE_CLASSIFIER_MODEL")
+        or os.getenv("GEMINI_MODEL", "gemini-2.5-pro"),
+        description="九宫格图像分类模型（默认跟随 GEMINI_MODEL，可任意字符串）",
+    )
+    SPATIAL_POINT_REASONER_MODEL: str = Field(
+        default_factory=lambda: os.getenv("SPATIAL_POINT_REASONER_MODEL")
+        or os.getenv("GEMINI_MODEL", "gemini-2.5-pro"),
+        description="点选/框选推理模型（默认跟随 GEMINI_MODEL，可任意字符串）",
+    )
+    SPATIAL_PATH_REASONER_MODEL: str = Field(
+        default_factory=lambda: os.getenv("SPATIAL_PATH_REASONER_MODEL")
+        or os.getenv("GEMINI_MODEL", "gemini-2.5-pro"),
+        description="拖拽路径推理模型（默认跟随 GEMINI_MODEL，可任意字符串）",
+    )
+
     # ================================
     # LLM 调用层（用户可配置）
     # ================================

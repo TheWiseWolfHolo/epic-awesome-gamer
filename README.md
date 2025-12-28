@@ -69,7 +69,7 @@
 | `LLM_MODE` | `gemini_native` | 三种模式：`openai` / `gemini_native` / `gemini_openai` |
 | `LLM_BASE_URL` | `https://generativelanguage.googleapis.com` | 由你提供的 Base URL；代码**绝不会**自动补 `/gemini`、`/v1` 等站点约定路径（除非你自己写在 base_url 里）。仅在 Gemini 两种模式下按官方规范自动追加 `/v1beta` 或 `/v1beta/openai/` |
 | `GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com` | **兼容旧变量**：未设置 `LLM_BASE_URL` 时回退使用；同样不会被代码私自改写 |
-| `GEMINI_MODEL` | `gemini-2.5-pro` | （保留字段）建议使用 2.5 Pro 或 1.5 Pro，视觉识别能力更强 |
+| `GEMINI_MODEL` | `gemini-2.5-pro` | **你填什么就用什么**：本项目会把它作为验证码求解的默认模型（并显式注入到 `CHALLENGE_CLASSIFIER_MODEL/IMAGE_CLASSIFIER_MODEL/SPATIAL_*`），模型名不做白名单限制 |
 
 ### 4. 启动工作流
 1. 点击仓库上方的 **Actions** 标签页。
