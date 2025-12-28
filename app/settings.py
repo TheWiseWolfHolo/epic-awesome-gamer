@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 import os
 import sys
-import asyncio
 from pathlib import Path
+from typing import Literal
 
 # === 引入所需库 ===
 from hcaptcha_challenger.agent import AgentConfig
@@ -31,13 +31,34 @@ class EpicSettings(AgentConfig):
     )
     
     GEMINI_BASE_URL: str = Field(
-        default=os.getenv("GEMINI_BASE_URL", "https://aihubmix.com"),
+        default=os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com"),
         description="中转地址",
     )
     
     GEMINI_MODEL: str = Field(
         default=os.getenv("GEMINI_MODEL", "gemini-2.5-pro"),
         description="模型名称",
+    )
+
+    # ================================
+    # LLM 调用层（用户可配置）
+    # ================================
+    LLM_MODE: Literal["openai", "gemini_native", "gemini_openai"] = Field(
+        default=os.getenv("LLM_MODE", "gemini_native"),
+        description="LLM 调用模式：openai / gemini_native / gemini_openai",
+    )
+
+    # 注意：优先使用 LLM_BASE_URL；未提供时向下兼容 GEMINI_BASE_URL
+    LLM_BASE_URL: str = Field(
+        default=os.getenv("LLM_BASE_URL", "")
+        or os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com"),
+        description="LLM Base URL（严禁代码擅自改写/重写）。",
+    )
+
+    # 是否在启动时执行 LLM preflight（deploy.py 中调用）
+    LLM_PREFLIGHT: bool = Field(
+        default=os.getenv("LLM_PREFLIGHT", "true").lower() in {"1", "true", "yes", "y", "on"},
+        description="启动时执行 LLM preflight/healthcheck（true/false）",
     )
 
     EPIC_EMAIL: str = Field(default_factory=lambda: os.getenv("EPIC_EMAIL"))
@@ -64,83 +85,37 @@ class EpicSettings(AgentConfig):
 settings = EpicSettings()
 settings.ignore_request_questions = ["Please drag the crossing to complete the lines"]
 
-# ==========================================
-# [方案一修复版] AiHubMix 终极补丁
-# ==========================================
-def _apply_aihubmix_patch():
+def _apply_llm_provider_patch() -> None:
+    """
+    将 hcaptcha-challenger 默认的 GeminiProvider 替换为本项目的通用 LLM Provider。
+
+    目标：
+    - 支持任意 base_url（严禁代码擅自改写/重写）
+    - 支持 OpenAI 兼容 & Gemini 官方（native / openai）三种模式
+    """
     if not settings.GEMINI_API_KEY:
         return
 
     try:
-        from google import genai
-        from google.genai import types
-        
-        # 1. 劫持 Client 初始化 (自动修正中转路径)
-        orig_init = genai.Client.__init__
-        def new_init(self, *args, **kwargs):
-            if hasattr(settings.GEMINI_API_KEY, 'get_secret_value'):
-                api_key = settings.GEMINI_API_KEY.get_secret_value()
-            else:
-                api_key = str(settings.GEMINI_API_KEY)
-            
-            kwargs['api_key'] = api_key
-            
-            base_url = settings.GEMINI_BASE_URL.rstrip('/')
-            if base_url.endswith('/v1'): base_url = base_url[:-3]
-            if not base_url.endswith('/gemini'): base_url = f"{base_url}/gemini"
-            
-            kwargs['http_options'] = types.HttpOptions(base_url=base_url)
-            logger.info(f"🚀 AiHubMix 补丁已应用 | 模型: {settings.GEMINI_MODEL} | 地址: {base_url}")
-            orig_init(self, *args, **kwargs)
-        
-        genai.Client.__init__ = new_init
+        from hcaptcha_challenger.tools.internal.base import Reasoner
+        from llm.provider import HcaptchaLLMProvider
 
-        # 2. 劫持文件上传 (绕过 400/403 错误，并修复 TypeError)
-        try:
-            file_cache = {}
+        def _create_default_provider(self):  # type: ignore[no-redef]
+            return HcaptchaLLMProvider(
+                api_key=str(self._api_key),
+                model=str(self._model) if self._model else "",
+                mode=settings.LLM_MODE,
+                base_url=settings.LLM_BASE_URL,
+            )
 
-            # 自定义 helper，避免依赖 google 内部库
-            def _local_to_list(c):
-                return c if isinstance(c, list) else [c]
-
-            async def patched_upload(self_files, file, **kwargs):
-                if hasattr(file, 'read'): content = file.read()
-                elif isinstance(file, (str, Path)):
-                    with open(file, 'rb') as f: content = f.read()
-                else: content = bytes(file)
-                
-                if asyncio.iscoroutine(content): content = await content
-                
-                # 伪造文件上传，实际只存内存
-                file_id = f"bypass_{id(content)}"
-                file_cache[file_id] = content
-                return types.File(name=file_id, uri=file_id, mime_type="image/png")
-
-            orig_generate = genai.models.AsyncModels.generate_content
-            async def patched_generate(self_models, model, contents, **kwargs):
-                normalized = _local_to_list(contents)
-                
-                for content in normalized:
-                    if hasattr(content, 'parts'):
-                        for i, part in enumerate(content.parts):
-                            # 如果发现是我们伪造的文件 ID，立马替换成 Base64
-                            if part.file_data and part.file_data.file_uri in file_cache:
-                                data = file_cache[part.file_data.file_uri]
-                                content.parts[i] = types.Part.from_bytes(data=data, mime_type="image/png")
-                
-                # [核心修复点] 强制使用关键字参数 model= 和 contents=
-                # 这解决了 "takes 1 positional argument but 3 were given" 的报错
-                return await orig_generate(self_models, model=model, contents=normalized, **kwargs)
-
-            genai.files.AsyncFiles.upload = patched_upload
-            genai.models.AsyncModels.generate_content = patched_generate
-            logger.info("🚀 Base64 文件绕过补丁加载成功 (参数兼容版)")
-            
-        except Exception as ie:
-            logger.warning(f"⚠️ 文件绕过补丁依然失败: {ie}")
-
+        Reasoner._create_default_provider = _create_default_provider  # type: ignore[method-assign]
+        logger.info(
+            "🚀 LLM Provider 补丁已应用 | mode: {} | base_url: {}",
+            settings.LLM_MODE,
+            settings.LLM_BASE_URL,
+        )
     except Exception as e:
-        logger.error(f"❌ 严重：AiHubMix 补丁加载完全失败! 原因: {e}")
+        logger.error(f"❌ LLM Provider 补丁加载失败: {e}")
 
-# 执行补丁
-_apply_aihubmix_patch()
+
+_apply_llm_provider_patch()

@@ -65,8 +65,10 @@
 
 | 变量名 | 默认值 | 说明 |
 | :--- | :--- | :--- |
-| `GEMINI_BASE_URL` | `https://aihubmix.com` | 如果使用官方接口，请填 `https://generativelanguage.googleapis.com` |
-| `GEMINI_MODEL` | `gemini-2.5-pro` | 推荐使用 2.5 Pro 或 1.5 Pro，视觉识别能力更强 |
+| `LLM_MODE` | `gemini_native` | 三种模式：`openai` / `gemini_native` / `gemini_openai` |
+| `LLM_BASE_URL` | `https://generativelanguage.googleapis.com` | 由你提供的 Base URL；代码**绝不会**自动补 `/gemini`、`/v1` 等站点约定路径（除非你自己写在 base_url 里）。仅在 Gemini 两种模式下按官方规范自动追加 `/v1beta` 或 `/v1beta/openai/` |
+| `GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com` | **兼容旧变量**：未设置 `LLM_BASE_URL` 时回退使用；同样不会被代码私自改写 |
+| `GEMINI_MODEL` | `gemini-2.5-pro` | （保留字段）建议使用 2.5 Pro 或 1.5 Pro，视觉识别能力更强 |
 
 ### 4. 启动工作流
 1. 点击仓库上方的 **Actions** 标签页。
@@ -104,8 +106,9 @@ services:
       - EPIC_EMAIL=your_email@example.com      # <--- 修改这里
       - EPIC_PASSWORD=your_password            # <--- 修改这里
       - GEMINI_API_KEY=sk-xxxxxxxxxxxx         # <--- 修改这里
-      # 可选：修改中转地址
-      - GEMINI_BASE_URL=[https://aihubmix.com](https://aihubmix.com) 
+      # 可选：LLM 协议与地址（严禁代码私自改写 base_url）
+      - LLM_MODE=gemini_native
+      - LLM_BASE_URL=https://generativelanguage.googleapis.com
     # ...
 
 ```

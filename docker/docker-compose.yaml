@@ -17,9 +17,18 @@ services:
       - GEMINI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxx
 
       # ----------------------------------------
-      # AiHubMix / Gemini 配置
+      # LLM 配置（严禁代码私自改写 base_url；按 LLM_MODE 选择协议）
       # ----------------------------------------
-      - GEMINI_BASE_URL=https://aihubmix.com
+      # 三种模式：openai / gemini_native / gemini_openai
+      - LLM_MODE=gemini_native
+      # base_url 由你决定是否包含 /v1、/proxy 等前缀；代码不会自动补 /gemini、/v1
+      # - openai: POST {base_url}/chat/completions
+      # - gemini_native: POST {base_url}/v1beta/models/{model}:generateContent（若 base_url 已含 /v1beta 则不重复添加）
+      # - gemini_openai: POST {base_url}/v1beta/openai/chat/completions（若 base_url 已含 /v1beta/openai 则不重复添加）
+      - LLM_BASE_URL=https://generativelanguage.googleapis.com
+
+      # 兼容旧变量（可选）：未设置 LLM_BASE_URL 时会回退使用 GEMINI_BASE_URL
+      - GEMINI_BASE_URL=https://generativelanguage.googleapis.com
       - GEMINI_MODEL=gemini-2.5-pro
 
       # ----------------------------------------

@@ -29,6 +29,7 @@ from services.epic_authorization_service import EpicAuthorization
 from services.epic_games_service import EpicAgent
 from settings import LOG_DIR, RECORD_DIR
 from settings import settings
+from llm.preflight import preflight_llm
 from utils import init_log
 
 # Initialize logging configuration for runtime, error, and serialization logs
@@ -109,6 +110,16 @@ async def deploy():
     logger.debug(
         f"Starting deployment with configuration: {json.dumps(sj, indent=2, ensure_ascii=False)}"
     )
+
+    # LLM preflight（失败时直接退出，避免后续只看到 JSONDecodeError/HTML）
+    if getattr(settings, "LLM_PREFLIGHT", True):
+        api_key = ""
+        if getattr(settings, "GEMINI_API_KEY", None):
+            try:
+                api_key = settings.GEMINI_API_KEY.get_secret_value()  # type: ignore[union-attr]
+            except Exception:
+                api_key = str(settings.GEMINI_API_KEY)
+        await preflight_llm(mode=settings.LLM_MODE, base_url=settings.LLM_BASE_URL, api_key=api_key)
 
     # Execute an immediate collection task
     await execute_browser_tasks(headless=headless)
