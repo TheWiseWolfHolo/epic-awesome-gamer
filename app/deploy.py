@@ -73,13 +73,16 @@ async def execute_browser_tasks(headless: bool = True):
         # Handle Epic Games authentication
         logger.debug("Initiating Epic Games authentication")
         agent = EpicAuthorization(page)
-        await agent.invoke()
+        auth_ok = await agent.invoke()
+        if not auth_ok:
+            logger.error("❌ Authentication failed, abort.")
+            return
         logger.debug("Authentication completed")
 
-        # Execute a free games collection on new page
+        # Execute a free games collection on the SAME page
+        # Reason: Epic 登录态可能依赖 sessionStorage/页面级状态，新开 tab 可能拿不到 isloggedin
         logger.debug("Starting free games collection process")
-        game_page = await browser.new_page()
-        agent = EpicAgent(game_page)
+        agent = EpicAgent(page)
         await agent.collect_epic_games()
         logger.debug("Free games collection completed")
 
